@@ -51,6 +51,7 @@
 #include "model/modelbin.h"
 #include "model/modelcodon.h"
 #include "utils/stoprule.h"
+#include "utils/gzstream.h"
 
 #include "tree/mtreeset.h"
 #include "tree/mexttree.h"
@@ -2784,20 +2785,21 @@ static void runSBAReplicate(SBAWorker &w, int b, Params &params,
     for (size_t k = 0; k < nptn*(size_t)ncat; k++) lhcat[k] = lhc[k];
 
     // before-smoothing per-site posteriors (replicate MLE weights)
-    {
+    if (params.sba_persite) {
         ostringstream ps; ps << setprecision(10);
         ostringstream key; key << (b+1) << '\t';
         writePerSitePosterior(ps, key.str(), aln, lhcat, boot_weights, ncat, nsite);
         persite_row = ps.str();
     }
 
-    // average Pr(omega>1) over D smoothed-weight draws (draws off the simplex are skipped)
+    // average Pr(omega>1) over D smoothed-weight draws; resample until exactly D land on the simplex
     vector<double> ptn_acc(nptn, 0.0);
     int naccept = 0;
     long local_draw = 0;
     ostringstream sm; sm << setprecision(10);
     ostringstream pssm; pssm << setprecision(10);   // after-smoothing per-site posteriors
-    for (int d = 0; d < D; d++)
+    long attempts = 0, max_attempts = (long)D * 100;   // guard against a pathological accept rate
+    while (naccept < D && attempts++ < max_attempts)
         if (drawSmoothedWeights(boot_weights, boot_omegas, h, ncat, is_m8, wsm, rstream)) {
             addPosteriorOmegaGt1(lhcat, boot_omegas, wsm, ncat, nptn, ptn_acc);
             naccept++;
@@ -2807,8 +2809,10 @@ static void runSBAReplicate(SBAWorker &w, int b, Params &params,
             for (int c = 0; c < ncat; c++) sm << "\t" << boot_omegas[c];
             for (int c = 0; c < ncat; c++) sm << "\t" << wsm[c];
             sm << endl;
-            ostringstream key; key << local_draw << '\t' << (b+1) << '\t';
-            writePerSitePosterior(pssm, key.str(), aln, lhcat, wsm, ncat, nsite);
+            if (params.sba_persite) {
+                ostringstream key; key << local_draw << '\t' << (b+1) << '\t';
+                writePerSitePosterior(pssm, key.str(), aln, lhcat, wsm, ncat, nsite);
+            }
         }
     sm_rows = sm.str();
     persite_sm_rows = pssm.str();
@@ -2970,9 +2974,10 @@ void runSmoothedBootstrapAggregation(Params &params, IQTree &iqtree,
     }
     sba_sm_out.close();
 
+    if (params.sba_persite) {   // per-site posterior files are opt-in
     // before-smoothing per-site per-class posteriors
-    string sba_ps_file = string(params.out_prefix) + ".sba_persite.tsv";
-    ofstream sba_ps_out(sba_ps_file.c_str());
+    string sba_ps_file = string(params.out_prefix) + ".sba_persite.tsv.gz";
+    ogzstream sba_ps_out(sba_ps_file.c_str());
     sba_ps_out << "replicate\tsite";
     for (int c = 0; c < ncat; c++) sba_ps_out << "\tP_class_" << c;
     sba_ps_out << endl;
@@ -2980,8 +2985,8 @@ void runSmoothedBootstrapAggregation(Params &params, IQTree &iqtree,
     sba_ps_out.close();
 
     // after-smoothing per-site posteriors (draw id renumbered like smoothed params)
-    string sba_pssm_file = string(params.out_prefix) + ".sba_persite_smoothed.tsv";
-    ofstream sba_pssm_out(sba_pssm_file.c_str());
+    string sba_pssm_file = string(params.out_prefix) + ".sba_persite_smoothed.tsv.gz";
+    ogzstream sba_pssm_out(sba_pssm_file.c_str());
     sba_pssm_out << "draw\torig_replicate\tsite";
     for (int c = 0; c < ncat; c++) sba_pssm_out << "\tP_class_" << c;
     sba_pssm_out << endl;
@@ -2997,6 +3002,7 @@ void runSmoothedBootstrapAggregation(Params &params, IQTree &iqtree,
         }
     }
     sba_pssm_out.close();
+    }   // end if (params.sba_persite)
 
     // --- Tear down workers ---
     for (int t = 0; t < npool; t++) {
